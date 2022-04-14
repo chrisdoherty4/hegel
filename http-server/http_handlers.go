@@ -14,6 +14,7 @@ import (
 
 	"github.com/itchyny/gojq"
 	"github.com/pkg/errors"
+	"github.com/tinkerbell/hegel/datamodel"
 	"github.com/tinkerbell/hegel/metrics"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -126,7 +127,9 @@ func getMetadata(filter string) http.HandlerFunc {
 			// in cacher mode, the "filter" is the exportedCacher type
 			// TODO (kdeng3849) figure out a way to remove the switch case
 			resp = ehw
-		case "1":
+		case datamodel.Kubernetes:
+			fallthrough
+		case datamodel.TinkServer:
 			resp, err = filterMetadata(ehw, filter)
 			if err != nil {
 				l.With("error", err).Info("failed to filter metadata")

@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 
 	cacherClient "github.com/packethost/cacher/client"
 	"github.com/packethost/cacher/protos/cacher"
 	"github.com/packethost/pkg/env"
 	"github.com/pkg/errors"
+	"github.com/tinkerbell/hegel/datamodel"
 	tinkClient "github.com/tinkerbell/tink/client"
 	tpkg "github.com/tinkerbell/tink/pkg"
 	tink "github.com/tinkerbell/tink/protos/hardware"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 var (
@@ -74,7 +78,7 @@ func NewCacherClient(cc cacher.CacherClient) (Client, error) {
 	var hg Client
 
 	switch dataModelVersion {
-	case "1":
+	case datamodel.TinkServer:
 		return nil, errors.New("NewCacherClient is only valid for the cacher data Model")
 	default:
 		hg = clientCacher{client: cc}
@@ -88,7 +92,39 @@ func NewClient() (Client, error) {
 	var hg Client
 
 	switch dataModelVersion {
-	case "1":
+	case datamodel.Kubernetes:
+		kubeApi := os.Getenv("HEGEL_KUBE_API")
+		kubeconfig := os.Getenv("HEGEL_KUBECONFIG")
+
+		kubeClientCfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			&clientcmd.ClientConfigLoadingRules{
+				ExplicitPath: kubeconfig,
+			},
+			&clientcmd.ConfigOverrides{
+				ClusterInfo: clientcmdapi.Cluster{
+					Server: kubeApi,
+				},
+			},
+		)
+
+		config, err := kubeClientCfg.ClientConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		namespace, _, err := kubeClientCfg.Namespace()
+		if err != nil {
+			return nil, err
+		}
+
+		kubeclient, err := NewKubernetesClient(config, namespace)
+		if err != nil {
+			return nil, errors.Wrap(err, "creating kubernetes hardware client")
+		}
+		kubeclient.WaitForCacheSync(context.Background())
+
+		hg = kubeclient
+	case datamodel.TinkServer:
 		tc, err := tinkClient.TinkHardwareClient()
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create the tink client")
