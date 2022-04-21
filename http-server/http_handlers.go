@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/itchyny/gojq"
 	"github.com/pkg/errors"
+	"github.com/tinkerbell/hegel/datamodel"
 	"github.com/tinkerbell/hegel/metrics"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -88,7 +88,7 @@ func healthCheckHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-func getMetadata(filter string) http.HandlerFunc {
+func getMetadata(filter string, model datamodel.DataModel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -112,35 +112,24 @@ func getMetadata(filter string) http.HandlerFunc {
 			return
 		}
 
-		ehw, err := hw.Export()
+		hardware, err := hw.Export()
 		if err != nil {
 			l.With("error", err).Info("failed to export hardware")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		var resp []byte
-		dataModelVersion := os.Getenv("DATA_MODEL_VERSION")
-		switch dataModelVersion {
-		case "":
-			// in cacher mode, the "filter" is the exportedCacher type
-			// TODO (kdeng3849) figure out a way to remove the switch case
-			resp = ehw
-		case "1":
-			resp, err = filterMetadata(ehw, filter)
+		if model == datamodel.TinkServer {
+			hardware, err = filterMetadata(hardware, filter)
 			if err != nil {
 				l.With("error", err).Info("failed to filter metadata")
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-		default:
-			l.Fatal(errors.New("unknown DATA_MODEL_VERSION"))
-			w.WriteHeader(http.StatusInternalServerError)
-			return
 		}
+
 		w.WriteHeader(http.StatusOK)
-		w.Header().Set("Content-Type", "application/json")
-		_, err = w.Write(resp)
+		_, err = w.Write(hardware)
 		if err != nil {
 			l.With("error", err).Info("failed to write response")
 		}

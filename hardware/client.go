@@ -3,21 +3,15 @@ package hardware
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 
 	cacherClient "github.com/packethost/cacher/client"
 	"github.com/packethost/cacher/protos/cacher"
-	"github.com/packethost/pkg/env"
 	"github.com/pkg/errors"
+	"github.com/tinkerbell/hegel/datamodel"
 	tinkClient "github.com/tinkerbell/tink/client"
 	tpkg "github.com/tinkerbell/tink/pkg"
 	tink "github.com/tinkerbell/tink/protos/hardware"
-)
-
-var (
-	dataModelVersion = env.Get("DATA_MODEL_VERSION")
-	facility         = flag.String("facility", env.Get("HEGEL_FACILITY", "onprem"), "The facility we are running in (mostly to connect to cacher)")
 )
 
 // Client defines the behaviors for interacting with hardware data providers.
@@ -70,12 +64,12 @@ type watcherTinkerbell struct {
 
 // NewCacherClient returns a new hardware Client, configured to use a provided cacher Client
 // This function is primarily used for testing.
-func NewCacherClient(cc cacher.CacherClient) (Client, error) {
+func NewCacherClient(cc cacher.CacherClient, model datamodel.DataModel) (Client, error) {
 	var hg Client
 
-	switch dataModelVersion {
-	case "1":
-		return nil, errors.New("NewCacherClient is only valid for the cacher data Model")
+	switch model {
+	case datamodel.TinkServer:
+		return nil, errors.New("cacher client is only valid for the cacher data model")
 	default:
 		hg = clientCacher{client: cc}
 	}
@@ -84,18 +78,18 @@ func NewCacherClient(cc cacher.CacherClient) (Client, error) {
 }
 
 // NewClient returns a new hardware Client, configured appropriately according to the mode (Cacher or Tink) Hegel is running in.
-func NewClient() (Client, error) {
+func NewClient(facility string, model datamodel.DataModel) (Client, error) {
 	var hg Client
 
-	switch dataModelVersion {
-	case "1":
+	switch model {
+	case datamodel.TinkServer:
 		tc, err := tinkClient.TinkHardwareClient()
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create the tink client")
 		}
 		hg = clientTinkerbell{client: tc}
 	default:
-		cc, err := cacherClient.New(*facility)
+		cc, err := cacherClient.New(facility)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create the cacher client")
 		}
