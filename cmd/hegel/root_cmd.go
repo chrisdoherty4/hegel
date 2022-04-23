@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	_ "net/http/pprof" //nolint:gosec // G108: Profiling endpoint is automatically exposed on /debug/pprof
@@ -18,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"github.com/tinkerbell/hegel/build"
 	"github.com/tinkerbell/hegel/datamodel"
 	grpcserver "github.com/tinkerbell/hegel/grpc-server"
 	"github.com/tinkerbell/hegel/hardware"
@@ -97,8 +94,9 @@ var _, _ = NewRootCommand()
 func NewRootCommand() (*RootCommand, error) {
 	rootCmd := &RootCommand{
 		Command: &cobra.Command{
-			Use:  os.Args[0],
-			Long: longHelp,
+			Use:          os.Args[0],
+			Long:         longHelp,
+			SilenceUsage: true,
 		},
 	}
 
@@ -132,14 +130,13 @@ func (c *RootCommand) PreRun(*cobra.Command, []string) error {
 
 // Run executes Hegel.
 func (c *RootCommand) Run(cmd *cobra.Command, _ []string) error {
-	cmdLogger, err := log.Init("github.com/tinkerbell/hegel")
+	logger, err := log.Init("github.com/tinkerbell/hegel")
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
-	defer cmdLogger.Close()
-	metrics.Init(cmdLogger)
+	defer logger.Close()
 
-	logger := cmdLogger.Package("main")
+	logger = logger.Package("main")
 
 	logger.With("opts", fmt.Sprintf("%+v", c.Opts)).Info("root command options")
 
@@ -153,7 +150,9 @@ func (c *RootCommand) Run(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("create client: %w", err)
 	}
 
-	grpcServer := grpcserver.NewServer(cmdLogger, hardwareClient)
+	go metrics.TrackClientHealth(cmd.Context(), logger, metrics.DefaultTrackClientHealthPollInterval, hardwareClient)
+
+	grpcServer := grpcserver.NewServer(logger, hardwareClient)
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	var routines run.Group
@@ -163,9 +162,9 @@ func (c *RootCommand) Run(cmd *cobra.Command, _ []string) error {
 			return httpserver.Serve(
 				ctx,
 				logger,
+				hardwareClient,
 				grpcServer,
 				c.Opts.HTTPPort,
-				build.GetGitRevision(),
 				time.Now(),
 				c.Opts.GetDataModel(),
 				c.Opts.HTTPCustomEndpoints,
@@ -191,18 +190,10 @@ func (c *RootCommand) Run(cmd *cobra.Command, _ []string) error {
 		func(error) { cancel() },
 	)
 
-	signalsCh := make(chan os.Signal, 1)
-	signal.Notify(signalsCh, os.Interrupt, syscall.SIGTERM)
 	routines.Add(
 		func() error {
-			select {
-			case sig, ok := <-signalsCh:
-				if ok {
-					cmdLogger.With("signal", sig).Info("received stop signal, gracefully shutting down")
-					return context.Canceled
-				}
-			case <-ctx.Done():
-			}
+			<-ctx.Done()
+			logger.Info("received stop signal, gracefully shutting down")
 			return nil
 		},
 		func(error) { cancel() },

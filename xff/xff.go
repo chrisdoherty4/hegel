@@ -154,24 +154,17 @@ func GRPCMiddlewares(l log.Logger, allowedSubnets []string) (grpc.StreamServerIn
 }
 
 // HTTPHandler creates a XFF handler if there are allowedSubnets specified.
-func HTTPHandler(l log.Logger, mux *http.ServeMux, allowedSubnets []string) http.Handler {
-	var handler http.Handler
-	if mux == nil {
-		mux = http.DefaultServeMux
+func HTTPHandler(handler http.Handler, allowedSubnets []string) (http.Handler, error) {
+	if len(allowedSubnets) == 0 {
+		return handler, nil
 	}
 
-	if len(allowedSubnets) > 0 {
-		xffmw, err := xff.New(xff.Options{
-			AllowedSubnets: allowedSubnets,
-		})
-		if err != nil {
-			l.Fatal(err, "error creating a new xff handler")
-		}
-
-		handler = xffmw.Handler(mux)
-	} else {
-		handler = mux
+	xffmw, err := xff.New(xff.Options{
+		AllowedSubnets: allowedSubnets,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create forward for handler: %w", err)
 	}
 
-	return handler
+	return xffmw.Handler(handler), nil
 }

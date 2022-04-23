@@ -29,7 +29,6 @@ func (hg HardwareClient) IsHealthy(context.Context) bool {
 func (hg HardwareClient) ByIP(_ context.Context, ip string) (hardware.Hardware, error) {
 	switch hg.Model {
 	case datamodel.TinkServer:
-		fmt.Printf("HELLO WORLD\n")
 		if ip != UserIP {
 			return nil, fmt.Errorf("received non-mock remote ip address: %v", ip)
 		}

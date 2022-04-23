@@ -1,0 +1,9 @@
+kind: Hardware
+apiVersion: tinkerbell.org/v1alpha1
+metadata:
+  name: "node1"
+spec:
+  metadata:
+    instance:
+      id: "node1"
+      hostname: "node1"
