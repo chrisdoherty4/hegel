@@ -19,10 +19,8 @@ import (
 	"github.com/tinkerbell/hegel/xff"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
 )
 
 //go:generate protoc -I grpc/protos grpc/protos/hegel.proto --go_out=plugins=grpc:grpc/hegel
@@ -31,8 +29,8 @@ type Server struct {
 	log            log.Logger
 	hardwareClient hardware.Client
 
-	subLock       *sync.RWMutex
-	subscriptions map[string]*Subscription
+	subscriptionsM *sync.RWMutex
+	subscriptions  map[string]*Subscription
 }
 
 type Subscription struct {
@@ -48,7 +46,7 @@ func NewServer(l log.Logger, hc hardware.Client) *Server {
 	return &Server{
 		log:            l,
 		hardwareClient: hc,
-		subLock:        &sync.RWMutex{},
+		subscriptionsM: &sync.RWMutex{},
 		subscriptions:  make(map[string]*Subscription),
 	}
 }
@@ -106,25 +104,14 @@ func Serve(_ context.Context, l log.Logger, srv *Server, port int, unparsedProxi
 	return nil
 }
 
-func (s *Server) Log() log.Logger {
-	return s.log
-}
+func (s *Server) Subscriptions() map[string]Subscription {
+	subscriptions := make(map[string]Subscription, len(s.subscriptions))
 
-func (s *Server) SubLock() *sync.RWMutex {
-	return s.subLock
-}
-
-func (s *Server) Subscriptions() map[string]*Subscription {
-	return s.subscriptions
-}
-
-// Try to parse out the peer IP.
-func peerIP(a net.Addr) string {
-	if tcp, ok := a.(*net.TCPAddr); ok {
-		return tcp.IP.String()
+	for key, subscription := range s.subscriptions {
+		subscriptions[key] = *subscription
 	}
-	// we see "bufconn" here under TestSubscribe
-	return a.String()
+
+	return subscriptions
 }
 
 func (s *Server) Get(ctx context.Context, _ *hegel.GetRequest) (*hegel.GetResponse, error) {
@@ -134,7 +121,7 @@ func (s *Server) Get(ctx context.Context, _ *hegel.GetRequest) (*hegel.GetRespon
 	}
 	s.log.With("client", p.Addr, "op", "get").Info()
 
-	ip := peerIP(p.Addr)
+	ip := extractIP(p.Addr)
 
 	hw, err := s.hardwareClient.ByIP(ctx, ip)
 	if err != nil {
@@ -159,8 +146,8 @@ func (s *Server) Subscribe(_ *hegel.SubscribeRequest, stream hegel.Hegel_Subscri
 
 	handleError := func(err error) error {
 		logger.Error(err)
+		metrics.Errors.WithLabelValues("subscribe", "active").Inc()
 		metrics.Subscriptions.WithLabelValues("initializing").Dec()
-		metrics.Errors.WithLabelValues("subscribe", "initializing").Inc()
 		timer.ObserveDuration()
 		return err
 	}
@@ -170,115 +157,118 @@ func (s *Server) Subscribe(_ *hegel.SubscribeRequest, stream hegel.Hegel_Subscri
 		return handleError(errors.New("could not get peer info from client"))
 	}
 
-	ip := peerIP(p.Addr)
+	ip := extractIP(p.Addr)
 
 	logger = logger.With("ip", ip, "client", p.Addr)
-
 	logger.Info()
 
-	hw, err := s.hardwareClient.ByIP(stream.Context(), ip)
-	if err != nil {
-		return handleError(err)
-	}
-
-	id, err := hw.ID()
+	id, err := s.getHardwareID(stream.Context(), ip)
 	if err != nil {
 		return handleError(err)
 	}
 
 	ctx, cancel := context.WithCancel(stream.Context())
-	watch, err := s.hardwareClient.Watch(ctx, id)
+	defer cancel()
+
+	hardwareUpdatesStream, err := s.hardwareClient.Watch(ctx, id)
 	if err != nil {
-		cancel()
 		return handleError(err)
 	}
 
-	sub := &Subscription{
+	newSubscription := &Subscription{
 		ID:           id,
 		IP:           ip,
 		StartedAt:    startedAt,
 		InitDuration: time.Since(startedAt),
 		cancel:       cancel,
-		updateChan:   make(chan []byte, 1),
 	}
 
-	s.subLock.Lock()
-	// NOTE: Access to s.subscriptions must be done within this lock to avoid race conditions
-	old := s.subscriptions[id] // nolint:ifshort // variable 'old' is only used in the if-statement in :237
-	s.subscriptions[id] = sub
-	s.subLock.Unlock()
+	// We support only a single subscription per hardware so if one exists cancel it's context.
+	s.removeSubscriptionIfExists(newSubscription)
 
-	// Disconnect previous client if a client is already connected for this hardware id
-	if old != nil {
-		old.cancel()
-	}
-
-	defer func() {
-		s.subLock.Lock()
-		defer s.subLock.Unlock()
-		// Check if subscription for hardware id exists.
-		// If the subscriptions exists, make sure it has not been replaced by a new connection.
-		if cSub := s.subscriptions[id]; cSub == sub {
-			delete(s.subscriptions, id)
-		}
-	}()
+	// On exit remove the subscription from the map. Because we only support a single subscription per hardware
+	// we need to check if the subscription currently registered in the map is the same as the subscription we
+	// were created with. If t is, we can remove ourselves else we want to leave it untouched as it represents
+	// a new stream.
+	defer s.removeSubscriptionIfExists(newSubscription)
 
 	timer.ObserveDuration()
 	metrics.Subscriptions.WithLabelValues("initializing").Dec()
 	metrics.Subscriptions.WithLabelValues("active").Inc()
+	defer metrics.Subscriptions.WithLabelValues("active").Dec()
 
-	activeError := func(err error) error {
-		if err == nil {
-			return nil
+	handleError = func(err error) error {
+		if err != nil {
+			logger.Error(err)
+			metrics.Errors.WithLabelValues("subscribe", "active").Inc()
 		}
-
-		logger.Error(err)
-		metrics.Subscriptions.WithLabelValues("active").Dec()
-		metrics.Errors.WithLabelValues("subscribe", "active").Inc()
 		return err
 	}
 
-	errs := make(chan error, 1)
-	go func() {
-		for {
-			hw, err := watch.Recv()
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					err = status.Error(codes.OK, "stream ended")
-				}
-				errs <- err
-				close(sub.updateChan)
-				return
-			}
-
-			ehw, err := hw.Export()
-			if err != nil {
-				errs <- err
-				close(sub.updateChan)
-				return
-			}
-
-			sub.updateChan <- ehw
+	for {
+		hardwareUpdate, err := hardwareUpdatesStream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
 		}
-	}()
-	go func() {
-		l := logger.With("op", "send")
-		for ehw := range sub.updateChan {
-			l.Info()
-			err := stream.Send(&hegel.SubscribeResponse{
-				JSON: string(ehw),
-			})
-			if err != nil {
-				errs <- err
-				cancel()
-				return
-			}
-		}
-	}()
 
-	var retErr error
-	if err := <-errs; status.Code(err) != codes.OK && retErr == nil {
-		retErr = err
+		if err != nil {
+			return handleError(err)
+		}
+
+		exportedHardware, err := hardwareUpdate.Export()
+		if err != nil {
+			return handleError(err)
+		}
+
+		if err := stream.Send(&hegel.SubscribeResponse{
+			JSON: string(exportedHardware),
+		}); err != nil {
+			return handleError(err)
+		}
 	}
-	return activeError(retErr)
+}
+
+// removeSubscriptionIfExists removes subscription if its still in the subscriptions map. The subscription in the map
+// may be a new subscription that overrode subscription when another client subscribed to the same hardware ID. In
+// that case, we leave the subscription alone.
+func (s *Server) removeSubscriptionIfExists(subscription *Subscription) {
+	s.subscriptionsM.Lock()
+	defer s.subscriptionsM.Unlock()
+
+	// Always cancel because its idempotent.
+	subscription.cancel()
+
+	if current := s.subscriptions[subscription.ID]; current == subscription {
+		delete(s.subscriptions, subscription.ID)
+	}
+}
+
+func (s *Server) replaceSubscriptionIfExists(subscription *Subscription) {
+	s.subscriptionsM.Lock()
+	defer s.subscriptionsM.Unlock()
+	if current, found := s.subscriptions[subscription.ID]; found {
+		current.cancel()
+	}
+	s.subscriptions[subscription.ID] = subscription
+}
+
+func (s *Server) getHardwareID(ctx context.Context, ip string) (string, error) {
+	hardwareData, err := s.hardwareClient.ByIP(ctx, ip)
+	if err != nil {
+		return "", err
+	}
+
+	id, err := hardwareData.ID()
+	if err != nil {
+		return "", err
+	}
+
+	return id, nil
+}
+
+func extractIP(a net.Addr) string {
+	if tcp, ok := a.(*net.TCPAddr); ok {
+		return tcp.IP.String()
+	}
+	return a.String()
 }
