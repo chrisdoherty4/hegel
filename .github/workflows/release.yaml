@@ -46,24 +46,24 @@ jobs:
             type=semver,pattern=v{{major}}.{{minor}}
             type=semver,pattern=v{{major}}
 
-      - name: Tag and push image
-        uses: akhilerm/tag-push-action@v2.0.0
-        with:
-          src: ${{ steps.src.outputs.tags }}
-          dst: |
-            ${{ steps.meta.outputs.tags }}
+      # - name: Tag and push image
+      #   uses: akhilerm/tag-push-action@v2.0.0
+      #   with:
+      #     src: ${{ steps.src.outputs.tags }}
+      #     dst: |
+      #       ${{ steps.meta.outputs.tags }}
 
-      - name: Publish release
-        uses: ncipollo/release-action@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          artifactErrorsFailBuild: true
-          generateReleaseNotes: true
-          draft: true
-          prerelease: ${{ contains(github.ref_name, '-rc') }}
-          body: |
-            ## Image
+      # - name: Publish release
+      #   uses: ncipollo/release-action@v1
+      #   with:
+      #     token: ${{ secrets.GITHUB_TOKEN }}
+      #     artifactErrorsFailBuild: true
+      #     generateReleaseNotes: true
+      #     draft: true
+      #     prerelease: ${{ contains(github.ref_name, '-rc') }}
+      #     body: |
+      #       ## Image
 
-            ```
-            docker pull quay.io/tinkerbell/hegel:${{ github.ref_name }}
-            ````
+      #       ```
+      #       docker pull quay.io/tinkerbell/hegel:${{ github.ref_name }}
+      #       ````
